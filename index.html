@@ -126,7 +126,8 @@ main{padding:26px 30px 60px;min-width:0}
 .hbar{display:grid;grid-template-columns:44px 1fr 32px;gap:8px;align-items:center;margin:6px 0;font-size:13px}
 .hbar .bar{height:10px}
 /* upload */
-.ways{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.ways .drop{padding:22px 12px}
+.ways{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-items:start}
+@media (max-width:1200px){.ways{grid-template-columns:1fr 1fr}}.ways .drop{padding:22px 12px}
 @media (max-width:900px){.ways{grid-template-columns:1fr}}
 .drop{border:2px dashed var(--border-strong);border-radius:var(--radius);padding:28px 16px;text-align:center;background:var(--surface);cursor:pointer;transition:.15s;display:block}
 .drop.over{border-color:var(--primary);background:var(--primary-soft)}
@@ -1395,8 +1396,14 @@ function renderUpload(id){
     <p class="muted small" style="margin:0">Mỗi dòng một DOI hoặc link bài báo. Ứng dụng kiểm tra từng bài:
       <br><span class="badge ok">✅ Đọc được toàn văn</span> bài truy cập mở → tự tải PDF và phân tích đầy đủ.
       <br><span class="badge bad">⛔ Không đọc được toàn văn</span> vẫn thêm vào bảng với tên bài, tác giả, tạp chí, năm, NXB, APA, tóm tắt; các trường nội dung để trống, có cảnh báo. Có PDF sau thì bấm <b>Đính kèm PDF</b>.</p>
-    <textarea id="doiIn" rows="4" placeholder="https://doi.org/10.1016/j.jbusres.2020.01.001&#10;10.3390/su15010001"></textarea>
-    <div class="row"><button class="btn primary sm" data-act="addDois">Kiểm tra &amp; thêm bài</button>${S.pdfProxy?'<span class="badge ok">Có proxy tải PDF</span>':'<span class="muted small">Mẹo: cấu hình “Proxy tải PDF” trong Cài đặt để tải được nhiều bài mở hơn.</span>'}</div>
+    <textarea id="doiIn" rows="4" placeholder="https://doi.org/10.3390/jrfm14100487&#10;10.1016/j.jbusres.2020.01.001"></textarea>
+    <div class="row"><button class="btn primary sm" data-act="addDois">Kiểm tra &amp; thêm bài</button></div>
+  </div></div>
+  <div class="card"><div class="form">
+    <h3 style="margin:0">Cách 3 — Dán link bài truy cập mở</h3>
+    <p class="muted small" style="margin:0">Mỗi dòng một link: link file PDF, hoặc link trang bài báo (MDPI, Econstor, ResearchGate công khai, kho lưu trữ của trường…). Ứng dụng <b>đọc trực tiếp từ link</b>: tải PDF; nếu link là trang web thì tự tìm file PDF trong trang; nếu vẫn không tải được thì đọc văn bản của bài và dựng lại thành PDF để phân tích.</p>
+    <textarea id="linkIn" rows="4" placeholder="https://www.mdpi.com/1911-8074/14/10/487&#10;https://www.econstor.eu/bitstream/…/file.pdf"></textarea>
+    <div class="row"><button class="btn primary sm" data-act="addLinks">Đọc từ link &amp; thêm bài</button></div>
   </div></div>
   </div>
   <div id="doiRes"></div>
@@ -1518,29 +1525,134 @@ async function proxyHeaders(){
   return tok?{Authorization:'Bearer '+tok,apikey:key||tok}:{};
 }
 const proxied=u=>S.pdfProxy.includes('{url}')?S.pdfProxy.replace('{url}',encodeURIComponent(u)):S.pdfProxy+encodeURIComponent(u);
-async function fetchPdfBlob(url){
-  const tries=[[url,{}]];
-  if(S.pdfProxy) tries.push([proxied(url),await proxyHeaders()]);
-  let last='';
-  for(const [u,headers] of tries){
-    const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),45000);
+// Proxy công cộng miễn phí để vượt chặn CORS (chỉ gửi link bài báo công khai)
+const PUBLIC_PROXIES=[
+  ['codetabs',u=>'https://api.codetabs.com/v1/proxy/?quest='+encodeURIComponent(u)],
+  ['allorigins',u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)],
+  ['corsproxy.io',u=>'https://corsproxy.io/?url='+encodeURIComponent(u)],
+];
+// Tải 1 link: trả {type:'pdf',blob,via} hoặc {type:'html',html,via}
+async function fetchVia(url){
+  const tries=[[url,{},'trực tiếp']];
+  if(S.pdfProxy) tries.push([proxied(url),await proxyHeaders(),'proxy của bạn']);
+  if(S.publicProxy!==false) for(const [n,f] of PUBLIC_PROXIES) tries.push([f(url),{},n]);
+  const errs=[];
+  for(const [u,headers,via] of tries){
+    const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),30000);
     try{
       const r=await fetch(u,{headers,signal:ctl.signal,redirect:'follow'});
-      if(!r.ok){last='HTTP '+r.status;continue}
+      if(!r.ok){errs.push(`${via}: HTTP ${r.status}`);continue}
       const b=await r.blob();
-      if(b.size>50*1024*1024){last='file > 50MB';continue}
-      const head=new TextDecoder().decode(await b.slice(0,1024).arrayBuffer());
-      if(!head.includes('%PDF-')){last='không phải file PDF (có thể là trang đăng nhập/captcha)';continue}
-      return new Blob([b],{type:'application/pdf'});
-    }catch(e){last=e.name==='AbortError'?'quá thời gian':'trình duyệt chặn (CORS)'}
+      if(b.size>50*1024*1024){errs.push(via+': file > 50MB');continue}
+      const head=new TextDecoder().decode(await b.slice(0,2048).arrayBuffer());
+      if(head.includes('%PDF-')) return {type:'pdf',blob:new Blob([b],{type:'application/pdf'}),via};
+      if(/<html|<!doctype html|<meta/i.test(head)) return {type:'html',html:await b.text(),via};
+      errs.push(via+': không phải PDF');
+    }catch(e){errs.push(via+': '+(e.name==='AbortError'?'quá thời gian':'bị chặn (CORS)'))}
     finally{clearTimeout(t)}
   }
-  throw new Error(last||'không tải được');
+  throw new Error(errs.slice(0,2).join(', ')||'không tải được');
+}
+// Đọc thẻ meta của trang bài báo (hầu hết NXB đều có citation_pdf_url, citation_doi)
+function parseHtmlMeta(html,base){
+  let d;try{d=new DOMParser().parseFromString(html,'text/html')}catch{return {}}
+  const m=n=>d.querySelector(`meta[name="${n}"],meta[property="${n}"]`)?.getAttribute('content')||'';
+  const abs=u=>{try{return u?new URL(u,base).href:''}catch{return ''}};
+  let pdf=abs(m('citation_pdf_url'))||abs(d.querySelector('link[type="application/pdf"]')?.getAttribute('href'));
+  if(!pdf){const a=[...d.querySelectorAll('a[href]')].find(a=>/\.pdf(\?|$)|\/pdf(\/|\?|$)/i.test(a.getAttribute('href'))&&/pdf|download|full\s*text|tải/i.test(a.textContent+' '+a.getAttribute('href')));pdf=abs(a?.getAttribute('href'))}
+  return {pdf,doi:bareDoi(m('citation_doi')||m('dc.identifier')||m('DC.Identifier')||m('prism.doi')),title:m('citation_title')||m('og:title')||d.title||''};
+}
+// Đọc văn bản trực tiếp từ link (PDF hoặc trang web) qua r.jina.ai — khi không tải được file PDF
+async function readerText(url){
+  const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),60000);
+  try{
+    const r=await fetch('https://r.jina.ai/'+url,{signal:ctl.signal});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    let x=await r.text();const i=x.indexOf('Markdown Content:');if(i>=0) x=x.slice(i+17);
+    return x.replace(/!\[[^\]]*\]\([^)]*\)/g,'').replace(/\[([^\]]*)\]\([^)]*\)/g,'$1').replace(/^#{1,6}\s*/gm,'')
+      .replace(/\*\*|__/g,'').replace(/^\s*[-*+]\s+/gm,'• ').replace(/^\s*\|?\s*-{3,}.*$/gm,'').replace(/\n{3,}/g,'\n\n').trim();
+  }finally{clearTimeout(t)}
+}
+// Văn bản có giống toàn văn bài báo không (không phải chỉ trang tóm tắt / trang đăng nhập)
+const looksFull=t=>t&&t.length>=12000&&/\b(references|bibliography|tài liệu tham khảo)\b/i.test(t)&&/\b(conclusions?|discussion|results?|findings)\b/i.test(t);
+// Dựng file PDF (chữ) từ văn bản để đi tiếp quy trình phân tích + xem như PDF thường
+const WIN={0x2013:0x96,0x2014:0x97,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2026:0x85,0x20AC:0x80,0x2122:0x99,0x2212:45};
+const SUBST={'α':'alpha','β':'beta','γ':'gamma','δ':'delta','ε':'epsilon','η':'eta','θ':'theta','λ':'lambda','μ':'mu','ρ':'rho','σ':'sigma','τ':'tau','χ':'chi','ω':'omega','Δ':'Delta','Σ':'Sigma','≤':'<=','≥':'>=','≠':'!=','≈':'~','→':'->','←':'<-','√':'sqrt','∗':'*',' ':' '};
+function winStr(s){
+  let o='';
+  for(const ch of s){
+    if(SUBST[ch]){o+=SUBST[ch];continue}
+    const c=ch.codePointAt(0);
+    if(c<128||(c>=160&&c<=255)){o+=ch;continue}
+    if(WIN[c]){o+=String.fromCharCode(WIN[c]);continue}
+    const b=ch.normalize('NFKD').replace(/[̀-ͯ]/g,'');o+=b.length===1&&b.charCodeAt(0)<256?b:'?';
+  }
+  return o;
+}
+function textToPdf(text,title){
+  const W=98,LPP=62,lines=[];
+  const push=par=>{par=winStr(par.replace(/\s+/g,' ').trim());if(!par){lines.push('');return}
+    while(par.length>W){let k=par.lastIndexOf(' ',W);if(k<40)k=W;lines.push(par.slice(0,k));par=par.slice(k).trimStart()}lines.push(par)};
+  if(title){push(title);lines.push('')}
+  for(const par of String(text).split(/\n/)) push(par);
+  const pages=[];for(let i=0;i<lines.length;i+=LPP) pages.push(lines.slice(i,i+LPP));
+  const escp=l=>l.replace(/[\\()]/g,m=>'\\'+m);
+  const objs=['<</Type/Catalog/Pages 2 0 R>>',null,'<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>'];
+  const kids=[];
+  for(const pg of pages){
+    const body='BT /F1 9.5 Tf 12 TL 50 800 Td\n'+pg.map(l=>`(${escp(l)}) Tj T*`).join('\n')+'\nET';
+    objs.push(`<</Length ${body.length}>>stream\n${body}\nendstream`);
+    objs.push(`<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents ${objs.length} 0 R/Resources<</Font<</F1 3 0 R>>>>>>`);
+    kids.push(objs.length+' 0 R');
+  }
+  objs[1]=`<</Type/Pages/Kids[${kids.join(' ')}]/Count ${kids.length}>>`;
+  let out='%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';const off=[];
+  objs.forEach((o,i)=>{off.push(out.length);out+=`${i+1} 0 obj\n${o}\nendobj\n`});
+  const x=out.length;
+  out+=`xref\n0 ${objs.length+1}\n0000000000 65535 f \n`+off.map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+`trailer<</Size ${objs.length+1}/Root 1 0 R>>\nstartxref\n${x}\n%%EOF`;
+  const u8=new Uint8Array(out.length);for(let i=0;i<out.length;i++) u8[i]=out.charCodeAt(i)&255;
+  return new Blob([u8],{type:'application/pdf'});
+}
+// Thử lần lượt các link để lấy toàn văn: PDF → trang có link PDF → đọc văn bản
+async function acquireFullText(cands,j,allowReader){
+  const errs=[],tried=new Set();
+  const step=m=>{j.status='download';j.msg=m;renderDoiJobs()};
+  for(const c of cands){
+    if(tried.has(c.url)) continue;tried.add(c.url);
+    step(`Đang tải từ ${c.src}…`);
+    try{
+      const r=await fetchVia(c.url);
+      const via=r.via==='trực tiếp'?'':` (qua ${r.via})`;
+      if(r.type==='pdf'){const info=await pdfInfo(r.blob);if(info) return {blob:r.blob,info,src:c.src+via,url:c.url};errs.push(c.src+': PDF hỏng');continue}
+      const meta=parseHtmlMeta(r.html,c.url);
+      j.htmlMeta=j.htmlMeta||meta;
+      if(meta.pdf&&!tried.has(meta.pdf)) cands.push({url:meta.pdf,src:c.src+' → PDF'});
+      else errs.push(c.src+': trang web không có link PDF');
+    }catch(e){errs.push(`${c.src}: ${e.message}`)}
+  }
+  if(allowReader&&S.reader!==false){
+    for(const c of cands.slice(0,3)){
+      step(`Đang đọc văn bản trực tiếp từ ${c.src}…`);
+      try{
+        const t=await readerText(c.url);
+        if(looksFull(t)){const blob=textToPdf(t,j.title||j.htmlMeta?.title);const info=await pdfInfo(blob);
+          if(info) return {blob,info,src:c.src+' — đọc văn bản qua r.jina.ai',url:c.url,rebuilt:true}}
+        else errs.push(c.src+': văn bản đọc được quá ngắn (có thể chỉ là trang tóm tắt)');
+      }catch(e){errs.push('Đọc văn bản: '+(e.message||e))}
+    }
+  }
+  j.errs=errs;return null;
+}
+async function doiFromPdf(blob){
+  try{const d=await pdfjsLib.getDocument({data:await blob.arrayBuffer()}).promise;let t='';
+    for(let i=1;i<=Math.min(2,d.numPages);i++) t+=(await (await d.getPage(i)).getTextContent()).items.map(x=>x.str).join(' ')+' ';
+    await d.destroy();return bareDoi(t)}catch{return null}
 }
 const safeName=s=>String(s||'').replace(/[\\/:*?"<>|\u0000-\u001F]+/g,' ').replace(/\s+/g,' ').trim();
 function doiFileName(j){
   const ay=j.cr?authorYearCR(j.cr):'';
-  let t=safeName(j.title)||j.doi.replace(/\//g,'_');
+  let host='';try{host=new URL(j.url).hostname}catch{}
+  let t=safeName(j.title)||(j.doi||host||'bai-bao').replace(/\//g,'_');
   if(t.length>90) t=t.slice(0,89).replace(/\s+\S*$/,'')+'…';
   return safeName((ay?ay+' - ':'')+t).slice(0,140)+'.pdf';
 }
@@ -1556,8 +1668,7 @@ async function pdfInfo(blob){
 }
 // Lý do không đọc được toàn văn
 function noFullReason(j){
-  if(j.pdfs?.length) return `Bài có bản truy cập mở nhưng trình duyệt không tải tự động được${j.errs?.length?` (${j.errs.join('; ')})`:''}. Bấm link bản mở bên dưới để tự tải PDF rồi “Đính kèm PDF”${S.pdfProxy?'':', hoặc cấu hình “Proxy tải PDF” trong Cài đặt'}.`;
-  if(j.isOa) return 'Bài truy cập mở nhưng không có link PDF trực tiếp — mở trang bài để tự tải PDF.';
+  if(j.isOa||j.pdfs?.length) return `Bài truy cập mở nhưng không tải/đọc tự động được${j.errs?.length?` (${j.errs.slice(0,3).join('; ')})`:''}. Bấm link bản mở bên dưới để tự tải PDF rồi “Đính kèm PDF”, hoặc dán link đó vào Cách 3.`;
   return 'Bài có phí (không có bản truy cập mở) — cần tải PDF qua thư viện trường / tài khoản nhà xuất bản.';
 }
 // Điền các trường theo template từ metadata DOI (khi chưa có toàn văn)
@@ -1603,55 +1714,98 @@ async function insertPaper(row){
   if(state.folder&&folderById(state.folder)) await linkPaper(data.id,state.folder,false).catch(e=>console.warn(e));
   return data;
 }
+const sameJob=(a,b)=>(a.doi&&b.doi&&a.doi.toLowerCase()===b.doi.toLowerCase())||(a.url&&b.url&&a.url===b.url);
+async function runJobs(fresh){
+  renderDoiJobs();
+  let idx=0;
+  const worker=async()=>{while(idx<fresh.length){const j=fresh[idx++];await (j.kind==='link'?runLinkJob(j):runDoiJob(j))}};
+  await Promise.all([worker(),worker()]);
+  const full=fresh.filter(j=>j.status==='full').length,part=fresh.filter(j=>j.status==='partial').length,meta=fresh.filter(j=>j.status==='meta').length,err=fresh.filter(j=>j.status==='error').length;
+  toast(`Đã thêm ${full+part+meta}/${fresh.length} bài: ${full} đọc được toàn văn${part?`, ${part} PDF nghi không đủ`:''}${meta?`, ${meta} chỉ có thông tin DOI`:''}${err?`, ${err} lỗi`:''}.`,meta||part||err?'':'ok');
+  renderFolders();renderUploadList();renderQueueBox();
+  if(full+part) runQueue();
+}
 async function addDois(text){
   const dois=parseDois(text);
   if(!dois.length) return toast('Không tìm thấy mã DOI nào (dạng 10.xxxx/…).','error');
   const fresh=[];
   for(const doi of dois){
-    if(doiJobs.some(j=>j.doi.toLowerCase()===doi.toLowerCase()&&!['error','dup'].includes(j.status))) continue;
+    if(doiJobs.some(j=>sameJob(j,{doi})&&!['error','dup'].includes(j.status))) continue;
     const ex=doiExisting(doi);
-    const j={doi,status:ex?'dup':'wait',paperId:ex?.id||null,title:ex?titleOf(ex):'',pdfs:[],pages:[],msg:''};
+    const j={kind:'doi',doi,status:ex?'dup':'wait',paperId:ex?.id||null,title:ex?titleOf(ex):'',pdfs:[],pages:[],msg:''};
     doiJobs.unshift(j);if(!ex) fresh.push(j);
   }
-  renderDoiJobs();
-  if(!fresh.length) return toast('Các DOI này đã có trong danh sách bài báo.');
-  let idx=0;
-  const worker=async()=>{while(idx<fresh.length) await runDoiJob(fresh[idx++])};
-  await Promise.all([worker(),worker()]);
-  const full=fresh.filter(j=>j.status==='full').length,part=fresh.filter(j=>j.status==='partial').length,meta=fresh.filter(j=>j.status==='meta').length;
-  toast(`Đã thêm ${full+part+meta}/${fresh.length} bài: ${full} đọc được toàn văn${part?`, ${part} PDF nghi không đủ`:''}${meta?`, ${meta} chỉ có thông tin DOI`:''}.`,meta||part?'':'ok');
-  renderFolders();renderUploadList();renderQueueBox();
-  if(full+part) runQueue();
+  if(!fresh.length){renderDoiJobs();return toast('Các DOI này đã có trong danh sách bài báo.')}
+  await runJobs(fresh);
+}
+async function addLinks(text){
+  const urls=[...new Set((String(text||'').match(/https?:\/\/[^\s"<>]+/gi)||[]).map(u=>u.replace(/[.,;)\]]+$/,'')))];
+  if(!urls.length) return toast('Không tìm thấy link nào (bắt đầu bằng http:// hoặc https://).','error');
+  const fresh=[];
+  for(const url of urls){
+    const doi=/doi\.org\//i.test(url)?bareDoi(decodeURIComponent(url)):null;
+    if(doiJobs.some(j=>sameJob(j,{url,doi})&&!['error','dup'].includes(j.status))) continue;
+    const ex=doi&&doiExisting(doi);
+    const j={kind:doi?'doi':'link',url,doi,status:ex?'dup':'wait',paperId:ex?.id||null,title:ex?titleOf(ex):'',pdfs:[],pages:[],msg:''};
+    doiJobs.unshift(j);if(!ex) fresh.push(j);
+  }
+  if(!fresh.length){renderDoiJobs();return toast('Các link này đã có trong danh sách.')}
+  await runJobs(fresh);
+}
+async function addMetaPaper(j){
+  const m={...j,reason:j.reason||noFullReason(j)};
+  const nid=crypto.randomUUID();
+  const fields=metaFields(m,null);
+  if(j.url&&j.kind==='link') fields.cite_link={value:j.url,page:'',quote:'',flag:'',source:'edited',note:'Link bạn gửi'};
+  const p=await insertPaper({id:nid,file_name:doiFileName(j).replace(/\.pdf$/,''),file_no:null,storage_path:'nopdf:'+nid,file_size:0,
+    fields,summary:metaSummary(m),status:'done',page_count:0,ai_model:'Thông tin DOI (chưa có toàn văn)',analyzed_at:new Date().toISOString()});
+  j.status='meta';j.paperId=p.id;j.msg=m.reason;
 }
 async function runDoiJob(j){
   j.status='search';j.msg='';j.errs=[];renderDoiJobs();
   try{
     const r=await findOa(j.doi);Object.assign(j,r);
     if(!r.cr&&!r.title){j.status='error';j.msg='DOI không tồn tại trên Crossref/OpenAlex — kiểm tra lại mã DOI.';return}
-    for(const c of r.pdfs){
-      j.status='download';j.msg='Đang tải PDF từ '+c.src+'…';renderDoiJobs();
-      try{
-        const blob=await fetchPdfBlob(c.url);const info=await pdfInfo(blob);
-        if(!info){j.errs.push(c.src+': file PDF hỏng');continue}
-        await saveDoiPdf(j,blob,c.src,info);return;
-      }catch(e){j.errs.push(`${c.src}: ${e.message}`)}
-    }
-    // Không đọc được toàn văn → vẫn thêm bài với thông tin DOI
-    const m={...j,reason:noFullReason(j)};
-    const name=doiFileName(j).replace(/\.pdf$/,'');
-    const nid=crypto.randomUUID();
-    const p=await insertPaper({id:nid,file_name:name,file_no:null,storage_path:'nopdf:'+nid,file_size:0,
-      fields:metaFields(m,null),summary:metaSummary(m),status:'done',page_count:0,ai_model:'Thông tin DOI (chưa có toàn văn)',analyzed_at:new Date().toISOString()});
-    j.status='meta';j.paperId=p.id;j.msg=m.reason;
+    const cands=[...r.pdfs,...r.pages];
+    if(r.isOa) cands.push({url:'https://doi.org/'+j.doi,src:'Trang bài báo'});
+    const got=cands.length?await acquireFullText(cands,j,r.isOa):null;
+    if(got){await saveDoiPdf(j,got);return}
+    await addMetaPaper(j);
   }catch(e){j.status='error';j.msg=e.message||String(e)}
   finally{renderDoiJobs();renderUploadList()}
 }
-async function saveDoiPdf(j,blob,src,info){
-  const doiF={doi:{value:'https://doi.org/'+j.doi,page:'',quote:'',flag:'',source:'edited',note:'Từ link DOI'+(src?` · PDF: ${src}`:'')}};
-  const p=await storePdf(blob,doiFileName(j),doiF);
+// Cách 3: đọc trực tiếp từ link bài truy cập mở (link PDF hoặc trang bài)
+async function runLinkJob(j){
+  j.status='search';j.msg='';j.errs=[];renderDoiJobs();
+  try{
+    let got=await acquireFullText([{url:j.url,src:'Link bạn gửi'}],j,true);
+    let doi=bareDoi(j.url)||j.htmlMeta?.doi||(got?await doiFromPdf(got.blob):null);
+    if(doi){
+      j.doi=doi;
+      const ex=doiExisting(doi);
+      if(ex){j.status='dup';j.paperId=ex.id;j.title=titleOf(ex);j.msg='DOI này đã có trong danh sách.';return}
+      const r=await findOa(doi);
+      if(r.cr||r.title){const {cr,oa,title,abstract,oaStatus,isOa,pdfs,pages}=r;Object.assign(j,{cr,oa,title,abstract,oaStatus,isOa,pdfs,pages})}
+      if(!got&&(j.pdfs.length||j.pages.length)) got=await acquireFullText([...j.pdfs,...j.pages],j,true);
+    }
+    j.title=j.title||j.htmlMeta?.title||'';
+    if(got){await saveDoiPdf(j,got);return}
+    if(doi){j.reason=`Không đọc được toàn văn từ link này (${(j.errs||[]).slice(0,3).join('; ')}). Đã thêm bài với thông tin từ DOI.`;await addMetaPaper(j);return}
+    j.status='error';j.msg='Không đọc được link này: '+((j.errs||[]).slice(0,3).join('; ')||'không rõ lỗi')+'. Hãy mở link, tải PDF về rồi dùng Cách 1.';
+  }catch(e){j.status='error';j.msg=e.message||String(e)}
+  finally{renderDoiJobs();renderUploadList()}
+}
+async function saveDoiPdf(j,got){
+  const {blob,src,info,rebuilt}=got;
+  const extra={};
+  if(j.doi) extra.doi={value:'https://doi.org/'+j.doi,page:'',quote:'',flag:'',source:'edited',note:'Từ link DOI · '+src};
+  if(j.kind==='link') extra.cite_link={value:j.url,page:'',quote:'',flag:'',source:'edited',note:'Link bạn gửi'};
+  const name=doiFileName(j).replace(/\.pdf$/,rebuilt?' (văn bản từ link).pdf':'.pdf');
+  const p=await storePdf(blob,name,extra);
   j.paperId=p.id;j.npages=info?.n||0;
-  if(info&&(info.n<3||info.chars<300)){j.status='partial';j.msg=`PDF tải được ${src?'từ '+src+' ':''}nhưng chỉ có ${info.n} trang${info.chars<300?' và gần như không có chữ (bản scan?)':''} — có thể không phải toàn văn. Kiểm tra lại PDF.`}
-  else{j.status='full';j.msg=`Đã tải PDF ${info?.n?info.n+' trang ':''}${src?'từ '+src:''} — đang phân tích.`}
+  if(rebuilt){j.status='full';j.msg=`Không tải được file PDF gốc nên đã đọc văn bản trực tiếp từ link (${src}) và dựng lại PDF ${info.n} trang — số trang trích dẫn là theo bản dựng lại, không phải PDF gốc. Đang phân tích.`}
+  else if(info&&(info.n<3||info.chars<300)){j.status='partial';j.msg=`PDF tải được (${src}) nhưng chỉ có ${info.n} trang${info.chars<300?' và gần như không có chữ (bản scan?)':''} — có thể không phải toàn văn. Kiểm tra lại PDF.`}
+  else{j.status='full';j.msg=`Đã tải PDF ${info?.n?info.n+' trang ':''}(${src}) — đang phân tích.`}
   renderUploadList();renderQueueBox();
 }
 // Đính kèm PDF cho bài chỉ có thông tin DOI
@@ -1671,20 +1825,20 @@ async function attachPdfToPaper(id){
     toast('Đã đính kèm PDF — bài sẽ được phân tích toàn văn.','ok');refresh();renderDoiJobs();runQueue();
   }catch(e){toast('Lỗi đính kèm: '+(e.message||e),'error')}
 }
-const DOI_ST={wait:['Đang chờ','info'],search:['Đang kiểm tra…','info'],download:['Đang tải PDF…','info'],
-  full:['✅ Đọc được toàn văn','ok'],partial:['⚠️ PDF nghi không đủ','warn'],meta:['⛔ Không đọc được toàn văn','bad'],dup:['Đã có trong danh sách','ok'],error:['Lỗi DOI','bad']};
+const DOI_ST={wait:['Đang chờ','info'],search:['Đang kiểm tra…','info'],download:['Đang tải / đọc…','info'],
+  full:['✅ Đọc được toàn văn','ok'],partial:['⚠️ PDF nghi không đủ','warn'],meta:['⛔ Không đọc được toàn văn','bad'],dup:['Đã có trong danh sách','ok'],error:['Lỗi','bad']};
 function renderDoiJobs(){
   const el=$('#doiRes');if(!el) return;
   if(!doiJobs.length){el.innerHTML='';return}
   const cnt=k=>doiJobs.filter(j=>j.status===k).length;
   const busy=j=>['wait','search','download'].includes(j.status);
   el.innerHTML=`${doiJobs.some(j=>!busy(j))?`<div class="row small" style="margin-top:10px;gap:6px">
-      ${cnt('full')?`<span class="badge ok">✅ ${cnt('full')} đọc được toàn văn</span>`:''}${cnt('partial')?`<span class="badge warn">⚠️ ${cnt('partial')} PDF nghi không đủ</span>`:''}${cnt('meta')?`<span class="badge bad">⛔ ${cnt('meta')} chỉ có thông tin DOI</span>`:''}${cnt('error')?`<span class="badge bad">${cnt('error')} DOI lỗi</span>`:''}</div>`:''}
+      ${cnt('full')?`<span class="badge ok">✅ ${cnt('full')} đọc được toàn văn</span>`:''}${cnt('partial')?`<span class="badge warn">⚠️ ${cnt('partial')} PDF nghi không đủ</span>`:''}${cnt('meta')?`<span class="badge bad">⛔ ${cnt('meta')} chỉ có thông tin DOI</span>`:''}${cnt('error')?`<span class="badge bad">${cnt('error')} lỗi</span>`:''}</div>`:''}
   <div class="list" style="margin-top:6px">${doiJobs.map((j,i)=>{const [l,c]=DOI_ST[j.status]||[j.status,''];
     const links=j.status==='meta'?[...(j.pdfs||[]).map(x=>({...x,src:'PDF · '+x.src})),...(j.pages||[])].slice(0,5):[];
     return `<div class="li" style="align-items:flex-start"><div class="t" style="min-width:0;flex:1">
-      <div class="fname">${j.paperId?`<a href="#/paper/${j.paperId}">${esc(j.title||j.doi)}</a>`:esc(j.title||j.doi)}</div>
-      <div class="muted small"><a href="https://doi.org/${esc(j.doi)}" target="_blank" rel="noopener">doi.org/${esc(j.doi)}</a>${j.oaStatus?` · ${esc(OA_KIND[j.oaStatus]||j.oaStatus)}`:''}</div>
+      <div class="fname">${j.paperId?`<a href="#/paper/${j.paperId}">${esc(j.title||j.doi||j.url)}</a>`:esc(j.title||j.doi||j.url)}</div>
+      <div class="muted small">${j.kind==='link'?`<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(trunc(j.url,70))}</a>${j.doi?' · ':''}`:''}${j.doi?`<a href="https://doi.org/${esc(j.doi)}" target="_blank" rel="noopener">doi.org/${esc(j.doi)}</a>`:''}${j.oaStatus?` · ${esc(OA_KIND[j.oaStatus]||j.oaStatus)}`:''}</div>
       ${j.msg?`<div class="small ${j.status==='meta'||j.status==='error'?'err':''}" style="margin-top:2px">${esc(j.msg)}</div>`:''}
       ${links.length?`<div class="small" style="margin-top:2px">Bản mở: ${links.map(x=>`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.src)}</a>`).join(' · ')}</div>`:''}
     </div><div class="row nowrap" style="gap:6px"><span class="badge ${c}">${busy(j)?'<span class="spin"></span>':''}${l}</span>
@@ -2204,7 +2358,9 @@ function renderSettings(){
     <label class="opt"><input type="checkbox" id="gcr" ${S.crossref!==false?'checked':''}><span>Tra <b>Crossref</b> theo DOI (miễn phí, không phải AI) để lấy chính xác tên bài, tác giả, tạp chí, năm, nhà xuất bản và tạo trích dẫn APA. Chỉ gửi mã DOI, không gửi nội dung bài.</span></label>
     <h3 style="margin:8px 0 0">Thêm bài từ DOI</h3>
     <label>Email cho Unpaywall (không bắt buộc)<input type="email" id="oaEmail" value="${esc(S.oaEmail||'')}" placeholder="ban@truong.edu.vn"><span class="muted small">Unpaywall yêu cầu email để tra bản PDF mở. Chỉ gửi mã DOI + email này tới api.unpaywall.org. Để trống thì bỏ qua Unpaywall.</span></label>
-    <label>Proxy tải PDF (không bắt buộc)<input type="text" id="pdfProxy" value="${esc(S.pdfProxy||'')}" placeholder="https://<project>.supabase.co/functions/v1/pdf-proxy?url="><span class="muted small">Nhiều trang nhà xuất bản không cho trình duyệt tải PDF trực tiếp (CORS). Proxy là một hàm nhỏ chạy trên máy chủ của bạn, tải hộ file PDF. Link bài sẽ được nối vào cuối (hoặc thay cho <code>{url}</code>).</span></label>
+    <label class="opt"><input type="checkbox" id="pubProxy" ${S.publicProxy!==false?'checked':''}><span>Dùng <b>proxy công cộng miễn phí</b> (codetabs, allorigins, corsproxy.io) khi trình duyệt bị nhà xuất bản chặn tải PDF. Chỉ gửi <b>link bài báo công khai</b>, không gửi dữ liệu của bạn.</span></label>
+    <label class="opt"><input type="checkbox" id="useReader" ${S.reader!==false?'checked':''}><span>Khi không tải được file PDF, <b>đọc văn bản trực tiếp từ link</b> qua r.jina.ai rồi dựng lại PDF để phân tích (số trang trích dẫn theo bản dựng lại). Chỉ gửi link bài báo công khai.</span></label>
+    <label>Proxy tải PDF riêng (không bắt buộc)<input type="text" id="pdfProxy" value="${esc(S.pdfProxy||'')}" placeholder="https://<project>.supabase.co/functions/v1/pdf-proxy?url="><span class="muted small">Nhiều trang nhà xuất bản không cho trình duyệt tải PDF trực tiếp (CORS). Proxy là một hàm nhỏ chạy trên máy chủ của bạn, tải hộ file PDF. Link bài sẽ được nối vào cuối (hoặc thay cho <code>{url}</code>).</span></label>
     <details><summary class="small">Cách tạo proxy bằng Supabase Edge Function</summary>
       <p class="small">1) Cài Supabase CLI, chạy <code>supabase functions new pdf-proxy</code>. 2) Dán đoạn mã dưới vào <code>supabase/functions/pdf-proxy/index.ts</code>. 3) Chạy <code>supabase functions deploy pdf-proxy</code>. 4) Điền <code>https://&lt;project&gt;.supabase.co/functions/v1/pdf-proxy?url=</code> vào ô trên. Hàm yêu cầu đăng nhập Supabase nên người lạ không dùng được.</p>
       <pre class="small" style="white-space:pre-wrap;background:var(--surface-2);padding:10px;border-radius:8px;overflow:auto">${esc(PROXY_CODE)}</pre></details>
@@ -2465,7 +2621,8 @@ async function boot(){
 // ---------- sự kiện ----------
 const ACT={
   addDois:async a=>{const t=$('#doiIn');if(!t)return;const v=t.value;t.value='';a.disabled=true;try{await addDois(v)}finally{a.disabled=false}},
-  doiRetry:a=>{const j=doiJobs[+a.dataset.i];if(j){runDoiJob(j).then(()=>{if(j.status==='done'){renderFolders();runQueue()}})}},
+  doiRetry:a=>{const j=doiJobs[+a.dataset.i];if(j){(j.kind==='link'?runLinkJob(j):runDoiJob(j)).then(()=>{renderFolders();if(['full','partial'].includes(j.status))runQueue()})}},
+  addLinks:async a=>{const t=$('#linkIn');if(!t)return;const v=t.value;t.value='';a.disabled=true;try{await addLinks(v)}finally{a.disabled=false}},
   doiClear:()=>{for(let i=doiJobs.length-1;i>=0;i--) if(!['wait','search','download'].includes(doiJobs[i].status)) doiJobs.splice(i,1);renderDoiJobs()},
   useLocal:async()=>{
     if(sb&&!isLocal()&&!await confirmBox('Lưu trên máy này, bắt đầu trống?','Trang này sẽ chuyển sang lưu dữ liệu trong trình duyệt, không cần Supabase. Dữ liệu trên Supabase vẫn giữ nguyên (muốn mang theo thì dùng nút “Chuyển sang lưu trên máy này (mang theo toàn bộ dữ liệu)”).'))return;
@@ -2587,7 +2744,7 @@ const ACT={
     }catch(e){toast('Key OpenAI không hợp lệ: '+e.message,'error')}finally{a.disabled=false}
   },
   toggleKey:a=>{const i=$('#'+(a.dataset.for||'gk'));i.type=i.type==='password'?'text':'password';a.textContent=i.type==='password'?'Hiện':'Ẩn'},
-  saveSettings:()=>{S.mode=$('input[name=mode]:checked')?.value||'rule';S.crossref=$('#gcr').checked;S.provider=$('input[name=prov]:checked')?.value||'gemini';S.openaiKey=$('#ok').value.trim();S.openaiModel=$('#om').value.trim()||'gpt-4.1-mini';S.geminiKey=$('#gk').value.trim();S.model=$('#gm').value.trim()||CONFIG.DEFAULT_MODEL;S.delaySec=Math.max(0,+$('#gd').value||0);if($('#pdfProxy'))S.pdfProxy=$('#pdfProxy').value.trim();if($('#oaEmail'))S.oaEmail=$('#oaEmail').value.trim();saveSettings();toast('Đã lưu cài đặt.','ok');
+  saveSettings:()=>{S.mode=$('input[name=mode]:checked')?.value||'rule';S.crossref=$('#gcr').checked;S.provider=$('input[name=prov]:checked')?.value||'gemini';S.openaiKey=$('#ok').value.trim();S.openaiModel=$('#om').value.trim()||'gpt-4.1-mini';S.geminiKey=$('#gk').value.trim();S.model=$('#gm').value.trim()||CONFIG.DEFAULT_MODEL;S.delaySec=Math.max(0,+$('#gd').value||0);if($('#pdfProxy'))S.pdfProxy=$('#pdfProxy').value.trim();if($('#pubProxy'))S.publicProxy=$('#pubProxy').checked;if($('#useReader'))S.reader=$('#useReader').checked;if($('#oaEmail'))S.oaEmail=$('#oaEmail').value.trim();saveSettings();toast('Đã lưu cài đặt.','ok');
     if(state.papers.some(p=>p.status==='queued')){Q.paused=false;Q.pauseReason='';runQueue()}},
   checkKey:async a=>{
     const key=$('#gk').value.trim();if(!key)return toast('Nhập key trước.');a.disabled=true;
