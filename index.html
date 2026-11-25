@@ -126,6 +126,8 @@ main{padding:26px 30px 60px;min-width:0}
 .hbar{display:grid;grid-template-columns:44px 1fr 32px;gap:8px;align-items:center;margin:6px 0;font-size:13px}
 .hbar .bar{height:10px}
 /* upload */
+.ways{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.ways .drop{padding:22px 12px}
+@media (max-width:900px){.ways{grid-template-columns:1fr}}
 .drop{border:2px dashed var(--border-strong);border-radius:var(--radius);padding:28px 16px;text-align:center;background:var(--surface);cursor:pointer;transition:.15s;display:block}
 .drop.over{border-color:var(--primary);background:var(--primary-soft)}
 .drop b{display:block;font-size:15px;margin-bottom:4px}
@@ -628,6 +630,7 @@ function setField(p,k,patch){
   return saveFields(p);
 }
 async function downloadPdf(p){
+  if(!hasPdf(p)) throw new AppErr('Bài chưa có PDF (chỉ có thông tin DOI) — hãy đính kèm PDF.');
   const {data,error}=await sb.storage.from(CONFIG.BUCKET).download(p.storage_path);
   if(error) throw new Error('Không tải được PDF: '+(error.message||error));
   return data;
@@ -1222,6 +1225,7 @@ async function ruleExtract(pages,p1,useCrossref,hintDoi=null){
 }
 
 async function analyzePaper(p){
+  if(!hasPdf(p)) return analyzeMeta(p);
   if(S.mode!=='ai') return analyzeRule(p);
   const blob=await downloadPdf(p);
   const pages=await extractPages(await blob.arrayBuffer());
@@ -1246,7 +1250,7 @@ async function analyzeRule(p){
 // ---------- hàng đợi ----------
 async function runQueue(){
   if(Q.running) return;
-  if(S.mode==='ai'&&!aiKey()){Q.paused=true;Q.pauseReason=`Chưa có ${PROVIDER_NAME[S.provider]} API key — vào Cài đặt để nhập, hoặc chuyển sang chế độ Không dùng AI.`;renderQueueBox();return}
+  if(S.mode==='ai'&&!aiKey()&&state.papers.some(p=>p.status==='queued'&&hasPdf(p))){Q.paused=true;Q.pauseReason=`Chưa có ${PROVIDER_NAME[S.provider]} API key — vào Cài đặt để nhập, hoặc chuyển sang chế độ Không dùng AI.`;renderQueueBox();return}
   Q.running=true;Q.paused=false;Q.pauseReason='';clearTimeout(Q.resumeTimer);renderQueueBox();
   try{
     while(!Q.paused){
@@ -1265,7 +1269,7 @@ async function processPaper(p){
     refresh();
     const r=await analyzePaper(getPaper(p.id)||p);
     if(!getPaper(p.id)) return;
-    await patchPaper(p.id,{status:'done',fields:r.fields,summary:r.summary,page_count:r.page_count,ai_model:S.mode==='ai'?aiLabel():'Tự động (không AI)',analyzed_at:new Date().toISOString(),error:null,overwrite_all:false});
+    await patchPaper(p.id,{status:'done',fields:r.fields,summary:r.summary,page_count:r.page_count,ai_model:!hasPdf(p)?'Thông tin DOI (chưa có toàn văn)':S.mode==='ai'?aiLabel():'Tự động (không AI)',analyzed_at:new Date().toISOString(),error:null,overwrite_all:false});
     try{if(await autoClassify(getPaper(p.id)))renderFolders()}catch(e){console.warn('autoClassify',e)}
   }catch(e){
     console.error(e);
@@ -1379,15 +1383,23 @@ function renderUpload(id){
   if(id==='failed') state.uf.status='failed';
   $('#main').innerHTML=`
   <div class="page-head"><div><h1>Tải lên & Quản lý PDF</h1><p>${scopeTag()} ${state.folder?'File tải lên sẽ vào thư mục này. ':''}Đặt tên file dạng <b>“5. Q2. Tên bài.pdf”</b> để tự nhận số thứ tự và xếp hạng tạp chí.</p></div></div>
-  <label class="drop" id="drop"><input type="file" id="fileIn" accept=".pdf,application/pdf" multiple hidden>
-    <b>Kéo thả file PDF vào đây hoặc bấm để chọn</b><span class="muted">Chọn được nhiều file cùng lúc (100+). Tối đa 50MB/file.</span></label>
-  <div class="card" style="margin-top:12px"><div class="form">
-    <h3 style="margin:0">Thêm bài từ link DOI</h3>
-    <p class="muted small" style="margin:0">Dán một hoặc nhiều DOI / link bài báo (mỗi dòng một bài), ví dụ <code>https://doi.org/10.3390/su15010001</code>. Ứng dụng tự tìm bản PDF <b>truy cập mở</b> (OpenAlex, Semantic Scholar${S.oaEmail?', Unpaywall':''}, arXiv, Europe PMC) rồi tải về và phân tích. Bài không có bản mở sẽ hiện link để bạn tự tải rồi bấm <b>Đính kèm PDF</b>.</p>
-    <textarea id="doiIn" rows="3" placeholder="https://doi.org/10.1016/j.jbusres.2020.01.001&#10;10.3390/su15010001"></textarea>
-    <div class="row"><button class="btn primary sm" data-act="addDois">Tìm &amp; tải PDF</button>${S.pdfProxy?'<span class="badge ok">Có proxy tải PDF</span>':'<span class="muted small">Mẹo: cấu hình “Proxy tải PDF” trong Cài đặt để tải được nhiều bài hơn.</span>'}</div>
-    <div id="doiRes"></div>
+  <div class="ways">
+  <div class="card"><div class="form">
+    <h3 style="margin:0">Cách 1 — Đã có file PDF</h3>
+    <p class="muted small" style="margin:0">Tải PDF lên để phân tích <b>toàn văn</b>: thiết kế, biến, giả thuyết, kết quả… đầy đủ theo template.</p>
+    <label class="drop" id="drop"><input type="file" id="fileIn" accept=".pdf,application/pdf" multiple hidden>
+      <b>Kéo thả file PDF vào đây hoặc bấm để chọn</b><span class="muted small">Chọn được nhiều file cùng lúc (100+). Tối đa 50MB/file.</span></label>
   </div></div>
+  <div class="card"><div class="form">
+    <h3 style="margin:0">Cách 2 — Chưa có PDF? Dán link DOI</h3>
+    <p class="muted small" style="margin:0">Mỗi dòng một DOI hoặc link bài báo. Ứng dụng kiểm tra từng bài:
+      <br><span class="badge ok">✅ Đọc được toàn văn</span> bài truy cập mở → tự tải PDF và phân tích đầy đủ.
+      <br><span class="badge bad">⛔ Không đọc được toàn văn</span> vẫn thêm vào bảng với tên bài, tác giả, tạp chí, năm, NXB, APA, tóm tắt; các trường nội dung để trống, có cảnh báo. Có PDF sau thì bấm <b>Đính kèm PDF</b>.</p>
+    <textarea id="doiIn" rows="4" placeholder="https://doi.org/10.1016/j.jbusres.2020.01.001&#10;10.3390/su15010001"></textarea>
+    <div class="row"><button class="btn primary sm" data-act="addDois">Kiểm tra &amp; thêm bài</button>${S.pdfProxy?'<span class="badge ok">Có proxy tải PDF</span>':'<span class="muted small">Mẹo: cấu hình “Proxy tải PDF” trong Cài đặt để tải được nhiều bài mở hơn.</span>'}</div>
+  </div></div>
+  </div>
+  <div id="doiRes"></div>
   <div id="upProg"></div>
   <div class="toolbar">
     <input type="search" id="uq" placeholder="Tìm theo tên file / tên bài…" value="${esc(state.uf.q)}">
@@ -1425,12 +1437,12 @@ function renderUploadList(){
   ${list.map(p=>{const s=paperStats(p);const fs=papersFolders(p.id);return `<tr draggable="true" data-drag="${p.id}">
     <td><input type="checkbox" data-act="selRow" data-id="${p.id}" ${state.selected.has(p.id)?'checked':''}></td>
     <td class="nowrap">${p.file_no??'–'}</td>
-    <td><div class="fname" title="${esc(p.file_name)}"><a href="#/paper/${p.id}">${esc(p.file_name)}</a></div>${p.status==='failed'?`<div class="err">${esc(p.error||'')}</div>`:''}${fs.length?`<div class="fchips">${fs.map(f=>`<span class="badge">📁 ${esc(folderPath(f))}</span>`).join('')}</div>`:''}</td>
+    <td><div class="fname" title="${esc(p.file_name)}"><a href="#/paper/${p.id}">${esc(p.file_name)}</a></div>${hasPdf(p)?'':'<span class="badge bad" title="Chỉ có thông tin từ DOI">⛔ Chưa có toàn văn</span>'}${p.status==='failed'?`<div class="err">${esc(p.error||'')}</div>`:''}${fs.length?`<div class="fchips">${fs.map(f=>`<span class="badge">📁 ${esc(folderPath(f))}</span>`).join('')}</div>`:''}</td>
     <td>${esc(fv(p,'rank'))||'<span class="badge warn">?</span>'}</td>
     <td class="nowrap">${statusBadge(p)}</td>
     <td class="nowrap">${p.status==='done'?`<span class="badge ${s.full?'ok':''}">${s.verified}/${FIELDS.length} ✓</span> ${s.issues?`<span class="badge warn">${s.issues} ⚠</span>`:''}`:''}</td>
     <td class="nowrap muted small">${fmtDate(p.updated_at)}</td>
-    <td class="nowrap"><a class="btn xs" href="#/paper/${p.id}">Xem</a> <button class="btn xs" data-act="openPdf" data-id="${p.id}">PDF</button> <button class="btn xs" data-act="reanalyze" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Phân tích lại</button> <button class="btn xs danger" data-act="deleteOne" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Xóa</button></td>
+    <td class="nowrap"><a class="btn xs" href="#/paper/${p.id}">Xem</a> ${hasPdf(p)?`<button class="btn xs" data-act="openPdf" data-id="${p.id}">PDF</button>`:`<button class="btn xs primary" data-act="attachPdf" data-id="${p.id}">Đính kèm PDF</button>`} <button class="btn xs" data-act="reanalyze" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Phân tích lại</button> <button class="btn xs danger" data-act="deleteOne" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Xóa</button></td>
   </tr>`}).join('')}</tbody></table>`;
 }
 // Lưu 1 file PDF (File/Blob) vào kho + tạo bản ghi bài báo
@@ -1478,7 +1490,7 @@ async function findOa(doi){
   const [cr,oa,s2,up]=await Promise.all([
     crossref(doi),
     jget('https://api.openalex.org/works/https://doi.org/'+doi),
-    jget('https://api.semanticscholar.org/graph/v1/paper/DOI:'+doi+'?fields=title,openAccessPdf,externalIds'),
+    jget('https://api.semanticscholar.org/graph/v1/paper/DOI:'+doi+'?fields=title,abstract,openAccessPdf,externalIds'),
     S.oaEmail?jget('https://api.unpaywall.org/v2/'+doi+'?email='+encodeURIComponent(S.oaEmail)):null,
   ]);
   const arx=(/^10\.48550\/arxiv\.(.+)$/i.exec(doi)||[])[1]||s2?.externalIds?.ArXiv;
@@ -1492,8 +1504,12 @@ async function findOa(doi){
   if(up){add(pdfs,up.best_oa_location?.url_for_pdf,'Unpaywall');for(const l of up.oa_locations||[]){add(pdfs,l.url_for_pdf,'Unpaywall');add(pages,l.url_for_landing_page,l.host_type==='repository'?'Kho lưu trữ':'Nhà xuất bản (mở)')}}
   add(pdfs,s2?.openAccessPdf?.url,'Semantic Scholar');
   const title=cr?stripTags((cr.title||[''])[0]):(oa?.title||s2?.title||'');
+  const oaStatus=oa?.open_access?.oa_status||up?.oa_status||(pdfs.length?'open':'closed');
   const isOa=!!(oa?.open_access?.is_oa||up?.is_oa||pdfs.length);
-  return {cr,title,pdfs,pages:pages.filter(x=>!pdfs.some(p=>p.url===x.url)),isOa};
+  let abstract=cr?.abstract?stripTags(String(cr.abstract).replace(/<jats:title>[^<]*<\/jats:title>/gi,' ')):'';
+  if(!abstract&&oa?.abstract_inverted_index){const w=[];for(const [k,pos] of Object.entries(oa.abstract_inverted_index)) for(const i of pos) w[i]=k;abstract=w.filter(Boolean).join(' ')}
+  if(!abstract&&s2?.abstract) abstract=s2.abstract;
+  return {cr,oa,title,abstract:abstract.replace(/^abstract[:.\s]+/i,'').trim(),pdfs,pages:pages.filter(x=>!pdfs.some(p=>p.url===x.url)),isOa,oaStatus};
 }
 async function proxyHeaders(){
   if(!/\.supabase\.(co|in)\/functions\//i.test(S.pdfProxy)) return {};
@@ -1529,13 +1545,70 @@ function doiFileName(j){
   return safeName((ay?ay+' - ':'')+t).slice(0,140)+'.pdf';
 }
 const doiJobs=[];
+const hasPdf=p=>!!p?.storage_path&&!String(p.storage_path).startsWith('nopdf:');
 const doiExisting=doi=>state.papers.find(p=>bareDoi(fv(p,'doi'))?.toLowerCase()===doi.toLowerCase());
+const OA_KIND={gold:'Gold OA',green:'Green OA (kho lưu trữ)',hybrid:'Hybrid OA',bronze:'Bronze OA',diamond:'Diamond OA',open:'Truy cập mở',closed:'Bài có phí'};
+// Kiểm tra PDF tải về: số trang + có chữ không
+async function pdfInfo(blob){
+  try{const d=await pdfjsLib.getDocument({data:await blob.arrayBuffer()}).promise;const n=d.numPages;let chars=0;
+    for(let i=1;i<=Math.min(n,3);i++){const tc=await (await d.getPage(i)).getTextContent();chars+=tc.items.map(x=>x.str).join('').length}
+    await d.destroy();return {n,chars}}catch{return null}
+}
+// Lý do không đọc được toàn văn
+function noFullReason(j){
+  if(j.pdfs?.length) return `Bài có bản truy cập mở nhưng trình duyệt không tải tự động được${j.errs?.length?` (${j.errs.join('; ')})`:''}. Bấm link bản mở bên dưới để tự tải PDF rồi “Đính kèm PDF”${S.pdfProxy?'':', hoặc cấu hình “Proxy tải PDF” trong Cài đặt'}.`;
+  if(j.isOa) return 'Bài truy cập mở nhưng không có link PDF trực tiếp — mở trang bài để tự tải PDF.';
+  return 'Bài có phí (không có bản truy cập mở) — cần tải PDF qua thư viện trường / tài khoản nhà xuất bản.';
+}
+// Điền các trường theo template từ metadata DOI (khi chưa có toàn văn)
+function metaFields(m,p){
+  const cr=m.cr||{},oa=m.oa||{},old=p?.fields||{},keep=!p?.overwrite_all;
+  const src=m.cr?'Crossref':'OpenAlex',note=`Từ ${src} theo DOI — chưa có toàn văn`;
+  const T=m.title||'';
+  const auth=m.cr?authorYearCR(cr):(()=>{const a=(oa.authorships||[]).map(x=>String(x.author?.display_name||'').split(' ').pop()).filter(Boolean),y=oa.publication_year||'n.d.';return !a.length?'':a.length===1?`${a[0]} (${y})`:a.length===2?`${a[0]} & ${a[1]} (${y})`:`${a[0]} et al. (${y})`})();
+  const val={
+    title:T,
+    short_title:T?(T.split(/[:?]/)[0].split(/\s+/).length<=10?T.split(/[:?]/)[0].trim():T.split(/\s+/).slice(0,8).join(' ')+'…'):'',
+    journal:stripTags((cr['container-title']||[''])[0])||oa.primary_location?.source?.display_name||'',
+    year:String(crYear(cr)||oa.publication_year||''),
+    author_year:auth,
+    publisher:cr.publisher||oa.primary_location?.source?.host_organization_name||'',
+    apa:m.cr?apaFromCR(cr):'',
+    cite_link:cr.resource?.primary?.URL||oa.primary_location?.landing_page_url||'',
+  };
+  const out={};
+  for(const f of FIELDS){
+    const o=old[f.k];
+    if(keep&&o&&(o.source==='edited'||o.source==='verified')){out[f.k]=o;continue}
+    if(f.k==='rank'){out.rank=o||{value:'',page:'',quote:'',flag:'unclear',source:'ai',note:'Cần nhập tay Q1–Q4'};continue}
+    const v=val[f.k];
+    out[f.k]={value:v||NA,page:'',quote:'',flag:'',source:'auto',note:v?note:'Chưa có toàn văn — đính kèm PDF để phân tích'};
+  }
+  out.doi={value:'https://doi.org/'+m.doi,page:'',quote:'',flag:'',source:'edited',note:'Từ link DOI'};
+  if(!(keep&&['edited','verified'].includes(old.anomalies?.source)))
+    out.anomalies={value:'⛔ CHƯA ĐỌC ĐƯỢC TOÀN VĂN — dữ liệu chỉ lấy từ thông tin DOI'+(m.abstract?' và tóm tắt (abstract)':'')+'; các trường thiết kế, biến, kết quả… chưa có. '+(m.reason||''),page:'',quote:'',flag:'anomalous',source:'auto',note:'Đính kèm PDF để phân tích đầy đủ'};
+  return out;
+}
+const metaSummary=m=>m.abstract?'Tóm tắt gốc (abstract, chưa có toàn văn): '+m.abstract:'Chưa có toàn văn và không tìm thấy tóm tắt (abstract) cho DOI này.';
+async function analyzeMeta(p){
+  const doi=bareDoi(fv(p,'doi'));if(!doi) throw new AppErr('Bài chưa có PDF và không có DOI — hãy đính kèm PDF.');
+  const r=await findOa(doi);if(!r.cr&&!r.title) throw new AppErr('Không tra được DOI '+doi);
+  const m={...r,doi,reason:noFullReason(r)};
+  return {fields:metaFields(m,p),summary:metaSummary(m),page_count:0};
+}
+async function insertPaper(row){
+  const {data,error}=await sb.from('papers').insert(cleanDeep(row)).select().single();
+  if(error) throw error;
+  state.papers.push(data);
+  if(state.folder&&folderById(state.folder)) await linkPaper(data.id,state.folder,false).catch(e=>console.warn(e));
+  return data;
+}
 async function addDois(text){
   const dois=parseDois(text);
   if(!dois.length) return toast('Không tìm thấy mã DOI nào (dạng 10.xxxx/…).','error');
   const fresh=[];
   for(const doi of dois){
-    if(doiJobs.some(j=>j.doi.toLowerCase()===doi.toLowerCase()&&j.status!=='error')) continue;
+    if(doiJobs.some(j=>j.doi.toLowerCase()===doi.toLowerCase()&&!['error','dup'].includes(j.status))) continue;
     const ex=doiExisting(doi);
     const j={doi,status:ex?'dup':'wait',paperId:ex?.id||null,title:ex?titleOf(ex):'',pdfs:[],pages:[],msg:''};
     doiJobs.unshift(j);if(!ex) fresh.push(j);
@@ -1545,57 +1618,80 @@ async function addDois(text){
   let idx=0;
   const worker=async()=>{while(idx<fresh.length) await runDoiJob(fresh[idx++])};
   await Promise.all([worker(),worker()]);
-  const ok=fresh.filter(j=>j.status==='done').length,need=fresh.filter(j=>j.status==='need').length;
-  if(fresh.length) toast(`DOI: đã tải ${ok}/${fresh.length} bài${need?` · ${need} bài cần bạn tự tải PDF`:''}.`,need?'':'ok');
+  const full=fresh.filter(j=>j.status==='full').length,part=fresh.filter(j=>j.status==='partial').length,meta=fresh.filter(j=>j.status==='meta').length;
+  toast(`Đã thêm ${full+part+meta}/${fresh.length} bài: ${full} đọc được toàn văn${part?`, ${part} PDF nghi không đủ`:''}${meta?`, ${meta} chỉ có thông tin DOI`:''}.`,meta||part?'':'ok');
   renderFolders();renderUploadList();renderQueueBox();
-  if(ok) runQueue();
+  if(full+part) runQueue();
 }
 async function runDoiJob(j){
-  j.status='search';j.msg='';renderDoiJobs();
+  j.status='search';j.msg='';j.errs=[];renderDoiJobs();
   try{
     const r=await findOa(j.doi);Object.assign(j,r);
     if(!r.cr&&!r.title){j.status='error';j.msg='DOI không tồn tại trên Crossref/OpenAlex — kiểm tra lại mã DOI.';return}
-    const errs=[];
     for(const c of r.pdfs){
-      j.status='download';j.msg='Đang tải từ '+c.src+'…';renderDoiJobs();
-      try{const blob=await fetchPdfBlob(c.url);await saveDoiPdf(j,blob,c.src);return}
-      catch(e){errs.push(`${c.src}: ${e.message}`)}
+      j.status='download';j.msg='Đang tải PDF từ '+c.src+'…';renderDoiJobs();
+      try{
+        const blob=await fetchPdfBlob(c.url);const info=await pdfInfo(blob);
+        if(!info){j.errs.push(c.src+': file PDF hỏng');continue}
+        await saveDoiPdf(j,blob,c.src,info);return;
+      }catch(e){j.errs.push(`${c.src}: ${e.message}`)}
     }
-    j.status='need';
-    j.msg=r.pdfs.length?`Có bản truy cập mở nhưng không tải tự động được (${errs.join('; ')}). ${S.pdfProxy?'':'Có thể cấu hình “Proxy tải PDF” trong Cài đặt để tải tự động.'}`
-      :r.isOa?'Bài truy cập mở nhưng không có link PDF trực tiếp.':'Không tìm thấy bản PDF truy cập mở (bài có thể cần quyền truy cập của thư viện/nhà xuất bản).';
+    // Không đọc được toàn văn → vẫn thêm bài với thông tin DOI
+    const m={...j,reason:noFullReason(j)};
+    const name=doiFileName(j).replace(/\.pdf$/,'');
+    const nid=crypto.randomUUID();
+    const p=await insertPaper({id:nid,file_name:name,file_no:null,storage_path:'nopdf:'+nid,file_size:0,
+      fields:metaFields(m,null),summary:metaSummary(m),status:'done',page_count:0,ai_model:'Thông tin DOI (chưa có toàn văn)',analyzed_at:new Date().toISOString()});
+    j.status='meta';j.paperId=p.id;j.msg=m.reason;
   }catch(e){j.status='error';j.msg=e.message||String(e)}
-  finally{renderDoiJobs()}
+  finally{renderDoiJobs();renderUploadList()}
 }
-async function saveDoiPdf(j,blob,src){
-  const name=doiFileName(j);
+async function saveDoiPdf(j,blob,src,info){
   const doiF={doi:{value:'https://doi.org/'+j.doi,page:'',quote:'',flag:'',source:'edited',note:'Từ link DOI'+(src?` · PDF: ${src}`:'')}};
-  const p=await storePdf(blob,name,doiF);
-  j.status='done';j.paperId=p.id;j.msg=src?'PDF từ '+src:'PDF bạn đính kèm';
+  const p=await storePdf(blob,doiFileName(j),doiF);
+  j.paperId=p.id;j.npages=info?.n||0;
+  if(info&&(info.n<3||info.chars<300)){j.status='partial';j.msg=`PDF tải được ${src?'từ '+src+' ':''}nhưng chỉ có ${info.n} trang${info.chars<300?' và gần như không có chữ (bản scan?)':''} — có thể không phải toàn văn. Kiểm tra lại PDF.`}
+  else{j.status='full';j.msg=`Đã tải PDF ${info?.n?info.n+' trang ':''}${src?'từ '+src:''} — đang phân tích.`}
   renderUploadList();renderQueueBox();
 }
-async function attachDoiPdf(i,file){
-  const j=doiJobs[i];if(!j||!file) return;
+// Đính kèm PDF cho bài chỉ có thông tin DOI
+function pickPdf(){return new Promise(res=>{const i=document.createElement('input');i.type='file';i.accept='.pdf,application/pdf';i.onchange=()=>res(i.files?.[0]||null);i.click()})}
+async function attachPdfToPaper(id){
+  const p=getPaper(id);if(!p) return;
+  const file=await pickPdf();if(!file) return;
   if(!(file.type==='application/pdf'||/\.pdf$/i.test(file.name))) return toast('Hãy chọn file PDF.','error');
   if(file.size>50*1024*1024) return toast('File lớn hơn 50MB.','error');
-  try{j.status='download';j.msg='Đang lưu…';renderDoiJobs();await saveDoiPdf(j,file,'');renderFolders();runQueue();toast('Đã thêm bài.','ok')}
-  catch(e){j.status='need';j.msg='Lỗi lưu: '+(e.message||e);toast(j.msg,'error')}
-  finally{renderDoiJobs()}
+  try{
+    const path=`${user.id}/${p.id}.pdf`;
+    const up=await sb.storage.from(CONFIG.BUCKET).upload(path,file,{contentType:'application/pdf',upsert:true});
+    if(up.error) throw up.error;
+    await patchPaper(p.id,{storage_path:path,file_size:file.size,file_name:/\.pdf$/i.test(p.file_name)?p.file_name:p.file_name+'.pdf',status:'queued',error:null,attempts:0,overwrite_all:false});
+    pdfCache.delete(p.id);
+    for(const j of doiJobs) if(j.paperId===p.id){j.status='full';j.msg='Đã đính kèm PDF — đang phân tích toàn văn.'}
+    toast('Đã đính kèm PDF — bài sẽ được phân tích toàn văn.','ok');refresh();renderDoiJobs();runQueue();
+  }catch(e){toast('Lỗi đính kèm: '+(e.message||e),'error')}
 }
-const DOI_ST={wait:['Đang chờ','info'],search:['Đang tìm…','info'],download:['Đang tải…','info'],done:['Đã thêm','ok'],need:['Cần PDF','warn'],dup:['Đã có','ok'],error:['Lỗi','bad']};
+const DOI_ST={wait:['Đang chờ','info'],search:['Đang kiểm tra…','info'],download:['Đang tải PDF…','info'],
+  full:['✅ Đọc được toàn văn','ok'],partial:['⚠️ PDF nghi không đủ','warn'],meta:['⛔ Không đọc được toàn văn','bad'],dup:['Đã có trong danh sách','ok'],error:['Lỗi DOI','bad']};
 function renderDoiJobs(){
   const el=$('#doiRes');if(!el) return;
   if(!doiJobs.length){el.innerHTML='';return}
-  el.innerHTML=`<div class="list" style="margin-top:10px">${doiJobs.map((j,i)=>{const [l,c]=DOI_ST[j.status]||[j.status,''];const busy=['wait','search','download'].includes(j.status);
-    return `<div class="li" style="align-items:flex-start"><div class="t" style="min-width:0">
+  const cnt=k=>doiJobs.filter(j=>j.status===k).length;
+  const busy=j=>['wait','search','download'].includes(j.status);
+  el.innerHTML=`${doiJobs.some(j=>!busy(j))?`<div class="row small" style="margin-top:10px;gap:6px">
+      ${cnt('full')?`<span class="badge ok">✅ ${cnt('full')} đọc được toàn văn</span>`:''}${cnt('partial')?`<span class="badge warn">⚠️ ${cnt('partial')} PDF nghi không đủ</span>`:''}${cnt('meta')?`<span class="badge bad">⛔ ${cnt('meta')} chỉ có thông tin DOI</span>`:''}${cnt('error')?`<span class="badge bad">${cnt('error')} DOI lỗi</span>`:''}</div>`:''}
+  <div class="list" style="margin-top:6px">${doiJobs.map((j,i)=>{const [l,c]=DOI_ST[j.status]||[j.status,''];
+    const links=j.status==='meta'?[...(j.pdfs||[]).map(x=>({...x,src:'PDF · '+x.src})),...(j.pages||[])].slice(0,5):[];
+    return `<div class="li" style="align-items:flex-start"><div class="t" style="min-width:0;flex:1">
       <div class="fname">${j.paperId?`<a href="#/paper/${j.paperId}">${esc(j.title||j.doi)}</a>`:esc(j.title||j.doi)}</div>
-      <div class="muted small"><a href="https://doi.org/${esc(j.doi)}" target="_blank" rel="noopener">doi.org/${esc(j.doi)}</a>${j.msg?' — '+esc(j.msg):''}</div>
-      ${j.status==='need'&&(j.pdfs.length||j.pages.length)?`<div class="small" style="margin-top:4px">Mở để tự tải: ${[...j.pdfs.map(x=>({...x,src:'PDF · '+x.src})),...j.pages].slice(0,5).map(x=>`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.src)}</a>`).join(' · ')}</div>`:''}
-    </div><div class="row nowrap" style="gap:6px"><span class="badge ${c}">${busy?'<span class="spin"></span>':''}${l}</span>
-      ${j.status==='need'?`<label class="btn xs primary">Đính kèm PDF<input type="file" accept=".pdf,application/pdf" hidden data-doi-file="${i}"></label>`:''}
+      <div class="muted small"><a href="https://doi.org/${esc(j.doi)}" target="_blank" rel="noopener">doi.org/${esc(j.doi)}</a>${j.oaStatus?` · ${esc(OA_KIND[j.oaStatus]||j.oaStatus)}`:''}</div>
+      ${j.msg?`<div class="small ${j.status==='meta'||j.status==='error'?'err':''}" style="margin-top:2px">${esc(j.msg)}</div>`:''}
+      ${links.length?`<div class="small" style="margin-top:2px">Bản mở: ${links.map(x=>`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.src)}</a>`).join(' · ')}</div>`:''}
+    </div><div class="row nowrap" style="gap:6px"><span class="badge ${c}">${busy(j)?'<span class="spin"></span>':''}${l}</span>
+      ${(j.status==='meta'||j.status==='partial')&&j.paperId?`<button class="btn xs primary" data-act="attachPdf" data-id="${j.paperId}">Đính kèm PDF</button>`:''}
       ${j.status==='error'?`<button class="btn xs" data-act="doiRetry" data-i="${i}">Thử lại</button>`:''}
     </div></div>`}).join('')}</div>
-    ${doiJobs.some(j=>!['wait','search','download'].includes(j.status))?'<div class="row" style="margin-top:8px"><button class="link small" data-act="doiClear">Xóa danh sách kết quả</button></div>':''}`;
+    ${doiJobs.some(j=>!busy(j))?'<div class="row" style="margin-top:8px"><button class="link small" data-act="doiClear">Xóa danh sách kết quả</button></div>':''}`;
 }
 
 async function uploadFiles(fileList){
@@ -1638,7 +1734,7 @@ async function deletePapers(ids){
   let ok=0;
   for(const id of ids){
     const p=getPaper(id);if(!p) continue;
-    const r1=await sb.storage.from(CONFIG.BUCKET).remove([p.storage_path]);
+    const r1=hasPdf(p)?await sb.storage.from(CONFIG.BUCKET).remove([p.storage_path]):{};
     if(r1.error){toast(`Không xóa được file ${p.file_name}: ${r1.error.message}`,'error');continue}
     const r2=await sb.from('papers').delete().eq('id',id);
     if(r2.error){toast(`Không xóa được dữ liệu ${p.file_name}: ${r2.error.message}`,'error');continue}
@@ -1680,12 +1776,13 @@ function renderPaper(id){
       <h1>${esc(isNA(fv(p,'title'))||!fv(p,'title')?p.file_name:fv(p,'title'))}</h1>
       <div class="dmeta" id="dmeta"></div></div>
     <div class="row">
-      <button class="btn sm" data-act="openPdf" data-id="${p.id}">Mở PDF gốc</button>
+      ${hasPdf(p)?`<button class="btn sm" data-act="openPdf" data-id="${p.id}">Mở PDF gốc</button>`:`<button class="btn sm primary" data-act="attachPdf" data-id="${p.id}">Đính kèm PDF</button>`}
       <button class="btn sm" data-act="reanalyze" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Phân tích lại</button>
       <button class="btn sm ok" data-act="verifyAll" data-id="${p.id}" ${p.status==='processing'?'disabled':''}>Xác nhận tất cả</button>
       <button class="btn sm danger" data-act="deleteOne" data-id="${p.id}">Xóa</button>
     </div></div>
   <div class="fchips" id="dfolders" style="margin:-8px 0 14px"></div>
+  ${hasPdf(p)?'':`<div class="callout bad"><b>⛔ Chưa đọc được toàn văn.</b> Bài này được thêm từ link DOI nên chỉ có thông tin thư mục (tên bài, tác giả, tạp chí, năm, APA) và tóm tắt. Các trường thiết kế, biến, giả thuyết, kết quả… chưa có. <button class="btn xs primary" data-act="attachPdf" data-id="${p.id}">Đính kèm PDF</button> ${fv(p,'doi')&&!isNA(fv(p,'doi'))?`<a class="btn xs" href="${esc(fv(p,'doi'))}" target="_blank" rel="noopener">Mở trang bài báo</a>`:''}</div>`}
   <div id="dstatus"></div>
   <div class="detail">
     <section>
@@ -1746,6 +1843,7 @@ function autosize(t){t.style.height='auto';t.style.height=(t.scrollHeight+2)+'px
 function autosizeAll(root=document){$$('textarea.fval,textarea.fquote',root).forEach(autosize)}
 async function openViewer(p){
   V.pid=p.id;V.doc=null;V.page=1;V.quote='';
+  if(!hasPdf(p)){const m=$('#vMsg');if(m) m.textContent='Chưa có PDF — bài chỉ có thông tin từ DOI. Bấm “Đính kèm PDF” để thêm toàn văn.';return}
   try{
     const doc=await getPdfDoc(p);
     if(V.pid!==p.id) return;
@@ -2231,7 +2329,7 @@ async function backupLocal(){
   const T=sb._T,zip=new JSZip();
   zip.file('data.json',JSON.stringify({app:'tro-ly-tong-quan-tai-lieu',version:APP_VERSION,exported_at:new Date().toISOString(),tables:T}));
   let n=0;
-  for(const p of T.papers){const b=await idbFile(sb._db,'get',p.storage_path).catch(()=>null);if(b){zip.file('files/'+p.storage_path,b,{binary:true,compression:'STORE'});n++}}
+  for(const p of T.papers){if(!hasPdf(p))continue;const b=await idbFile(sb._db,'get',p.storage_path).catch(()=>null);if(b){zip.file('files/'+p.storage_path,b,{binary:true,compression:'STORE'});n++}}
   toast('Đang nén file sao lưu…');
   const blob=await zip.generateAsync({type:'blob'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`Sao_luu_Tro_ly_${new Date().toISOString().slice(0,10)}.zip`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),10000);
@@ -2245,6 +2343,7 @@ async function importIntoLocal(tables,getFile,replace,onProgress=()=>{}){
   for(const t of LOCAL_TABLES){const rows=(tables[t]||[]).map(cleanDeep);for(let i=0;i<rows.length;i+=200) await idbWrite(db,t,rows.slice(i,i+200))}
   const papers=tables.papers||[];let ok=0,miss=[];
   for(let i=0;i<papers.length;i++){const p=papers[i];onProgress(i+1,papers.length,p.file_name);
+    if(!hasPdf(p)) continue;
     try{const b=await getFile(p);if(b){await idbFile(db,'put',p.storage_path,b);ok++}else miss.push(p.file_name)}catch(e){miss.push(p.file_name)}}
   return {ok,miss};
 }
@@ -2428,8 +2527,10 @@ const ACT={
   selRow:a=>{a.checked?state.selected.add(a.dataset.id):state.selected.delete(a.dataset.id);saveSel();$$('.selN').forEach(x=>x.textContent=a.closest('#clist')?[...state.selected].filter(id=>getPaper(id)?.status==='done').length:state.selected.size);const u=$('#uSelInfo');if(u){const n=uploadVisible().filter(p=>state.selected.has(p.id)).length;u.textContent=n?`Đã chọn ${n}`:''}},
   selAll:a=>{const list=a.dataset.scope==='upload'?uploadVisible():tableVisible();list.forEach(p=>a.checked?state.selected.add(p.id):state.selected.delete(p.id));saveSel();a.dataset.scope==='upload'?renderUploadList():renderTableBody()},
   cmpAll:a=>{$$('#clist .li').forEach(l=>{if(l.hidden)return;const c=l.querySelector('input');c.checked=a.dataset.v==='1';c.checked?state.selected.add(c.dataset.id):state.selected.delete(c.dataset.id)});saveSel();$$('.selN').forEach(x=>x.textContent=[...state.selected].filter(id=>getPaper(id)?.status==='done').length)},
+  attachPdf:a=>attachPdfToPaper(a.dataset.id),
   openPdf:async a=>{
-    const p=getPaper(a.dataset.id);const w=window.open('','_blank');
+    const p=getPaper(a.dataset.id);
+    if(!hasPdf(p)){const d=fv(p,'doi');return d&&!isNA(d)?window.open(d,'_blank','noopener'):toast('Bài chưa có PDF.')}const w=window.open('','_blank');
     const {data,error}=await sb.storage.from(CONFIG.BUCKET).createSignedUrl(p.storage_path,3600);
     if(error){w&&w.close();return toast('Không mở được PDF: '+error.message,'error')}
     if(w) w.location=data.signedUrl;else location.href=data.signedUrl;
@@ -2513,7 +2614,6 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{
   const t=e.target;
   if(t.dataset.actChange==='folderSel'){setFolder(t.value||null);return}
-  if(t.dataset.doiFile!=null){attachDoiPdf(+t.dataset.doiFile,t.files?.[0]);t.value='';return}
   if(!t.dataset.input) return;
   const p=getPaper(t.dataset.id),k=t.dataset.k,key=t.dataset.input;if(!p) return;
   const val=t.value.trim(),cur=p.fields?.[k]||{};
